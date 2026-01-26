@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blackjack - Mehrspieler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        .card {
+            display: inline-block;
+            font-size: 3rem;
+            margin: 0.25rem;
+            transition: transform 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card-red {
+            color: #dc2626;
+        }
+        .card-black {
+            color: #1f2937;
+        }
+        .pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: .5;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-green-800 to-green-600 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-5xl font-bold text-center text-white mb-8 drop-shadow-lg">
+            ♠️ Blackjack - Mehrspieler ♥️
+        </h1>
+
+        <!-- Login Bereich -->
+        <div id="login-section" class="max-w-md mx-auto bg-white/10 backdrop-blur-sm rounded-xl p-6 mb-6">
+            <h2 class="text-2xl font-bold text-white mb-4 text-center">Tisch beitreten</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-white text-lg mb-2">Dein Name:</label>
+                    <input 
+                        type="text" 
+                        id="player-name-input" 
+                        value="Spieler" 
+                        class="w-full px-4 py-2 rounded-lg text-xl font-bold text-center"
+                        maxlength="20"
+                    />
+                </div>
+                <div>
+                    <label class="block text-white text-lg mb-2">Raum-ID (optional):</label>
+                    <input 
+                        type="text" 
+                        id="room-id-input" 
+                        value="default" 
+                        class="w-full px-4 py-2 rounded-lg text-xl font-bold text-center"
+                        maxlength="30"
+                    />
+                </div>
+                <button 
+                    onclick="joinGame()" 
+                    class="w-full bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg"
+                >
+                    🚪 Beitreten
+                </button>
+            </div>
+        </div>
+
+        <!-- Spielbereich -->
+        <div id="game-container" class="max-w-6xl mx-auto hidden">
+            
+            <!-- Status Leiste -->
+            <div class="bg-white/10 backdrop-blur-sm rounded-xl p-4 mb-6">
+                <div class="flex justify-between items-center">
+                    <div class="text-white">
+                        <span class="text-xl font-bold">🎮 Raum:</span>
+                        <span id="room-display" class="text-lg ml-2">-</span>
+                    </div>
+                    <div class="text-white">
+                        <span class="text-xl font-bold">👥 Spieler:</span>
+                        <span id="player-count" class="text-lg ml-2">0/7</span>
+                    </div>
+                    <div>
+                        <span id="game-status" class="text-xl font-bold text-yellow-400">Warte auf Spieler...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bereit Button -->
+            <div id="ready-section" class="bg-white/10 backdrop-blur-sm rounded-xl p-6 mb-6 hidden">
+                <div class="text-center">
+                    <h3 class="text-2xl font-bold text-white mb-4">Bereit zum Spielen?</h3>
+                    <button 
+                        id="ready-btn"
+                        onclick="toggleReady()" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-12 py-4 rounded-lg text-2xl font-bold shadow-lg transition-all"
+                    >
+                        ✅ Bereit
+                    </button>
+                    <p class="text-white mt-4 text-lg">Warte auf andere Spieler...</p>
+                </div>
+            </div>
+
+            <!-- Dealer Bereich -->
+            <div class="bg-white/10 backdrop-blur-sm rounded-xl p-6 mb-6">
+                <h2 class="text-2xl font-bold text-white mb-4">🎩 Dealer</h2>
+                <div id="dealer-cards" class="text-center mb-4"></div>
+                <div id="dealer-value" class="text-center text-xl font-semibold text-white"></div>
+            </div>
+
+            <!-- Spieler Bereich -->
+            <div id="players-container" class="space-y-4 mb-6"></div>
+
+            <!-- Betting Bereich -->
+            <div id="betting-section" class="bg-white/10 backdrop-blur-sm rounded-xl p-6 mb-6 hidden">
+                <h3 class="text-2xl font-bold text-white mb-4">💰 Einsatz platzieren</h3>
+                <div class="flex flex-col items-center space-y-4">
+                    <div class="flex items-center space-x-4">
+                        <label class="text-white text-xl font-semibold">Einsatz:</label>
+                        <input 
+                            type="number" 
+                            id="bet-input" 
+                            value="10" 
+                            min="1" 
+                            class="px-4 py-2 rounded-lg text-xl font-bold w-32 text-center"
+                        />
+                    </div>
+                    <div class="flex flex-wrap gap-2 justify-center">
+                        <button onclick="setBet(5)" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">
+                            5 €
+                        </button>
+                        <button onclick="setBet(10)" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">
+                            10 €
+                        </button>
+                        <button onclick="setBet(25)" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">
+                            25 €
+                        </button>
+                        <button onclick="setBet(50)" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">
+                            50 €
+                        </button>
+                        <button onclick="setBet(100)" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">
+                            100 €
+                        </button>
+                    </div>
+                    <button 
+                        onclick="placeBet()" 
+                        class="bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg"
+                    >
+                        Einsatz bestätigen
+                    </button>
+                </div>
+            </div>
+
+            <!-- Aktionen Bereich -->
+            <div id="actions-section" class="bg-white/10 backdrop-blur-sm rounded-xl p-6 hidden">
+                <div id="turn-indicator" class="text-center mb-4">
+                    <span class="text-2xl font-bold text-yellow-400"></span>
+                </div>
+                <div class="flex flex-wrap justify-center gap-4">
+                    <button 
+                        id="hit-btn"
+                        type="button"
+                        onclick="hit()" 
+                        class="bg-yellow-500 hover:bg-yellow-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        🃏 Karte ziehen
+                    </button>
+                    <button 
+                        id="stand-btn"
+                        type="button"
+                        onclick="stand()" 
+                        class="bg-red-500 hover:bg-red-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        ✋ Stehen bleiben
+                    </button>
+                    <button 
+                        id="double-btn"
+                        type="button"
+                        onclick="double()" 
+                        class="bg-purple-500 hover:bg-purple-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        ⬆️ Verdoppeln
+                    </button>
+                    <button 
+                        id="split-btn"
+                        type="button"
+                        onclick="split()" 
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        ✂️ Splitten
+                    </button>
+                </div>
+            </div>
+
+            <!-- Ergebnis Bereich -->
+            <div id="results-section" class="bg-white/10 backdrop-blur-sm rounded-xl p-6 mt-6 hidden">
+                <h3 class="text-2xl font-bold text-white mb-4 text-center">🎯 Ergebnisse</h3>
+                <div id="results-container" class="space-y-2"></div>
+                <div class="text-center mt-6">
+                    <button 
+                        onclick="newRound()" 
+                        class="bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-lg text-xl font-bold shadow-lg"
+                    >
+                        ♻️ Neue Runde
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let gameState = null;
+        let myPlayerId = null;
+        let isReady = false;
+
+        socket.on('connect', () => {
+            console.log('Verbunden mit Server');
+        });
+
+        socket.on('game_state', (data) => {
+            gameState = data;
+            updateUI();
+        });
+
+        socket.on('player_joined', (data) => {
+            console.log(`${data.player_name} ist beigetreten (${data.player_count} Spieler)`);
+        });
+
+        socket.on('player_left', (data) => {
+            console.log(`${data.player_name} hat den Tisch verlassen`);
+        });
+
+        socket.on('round_results', (data) => {
+            showResults(data.results);
+        });
+
+        socket.on('error', (data) => {
+            alert(data.message);
+        });
+
+        function joinGame() {
+            const name = document.getElementById('player-name-input').value.trim() || 'Spieler';
+            const roomId = document.getElementById('room-id-input').value.trim() || 'default';
+            
+            socket.emit('join_game', { name: name, room_id: roomId });
+            
+            document.getElementById('login-section').classList.add('hidden');
+            document.getElementById('game-container').classList.remove('hidden');
+            document.getElementById('room-display').textContent = roomId;
+        }
+
+        function toggleReady() {
+            isReady = !isReady;
+            socket.emit('toggle_ready');
+            
+            const btn = document.getElementById('ready-btn');
+            if (isReady) {
+                btn.textContent = '⏳ Warte...';
+                btn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                btn.classList.add('bg-gray-500', 'cursor-not-allowed');
+                btn.disabled = true;
+            } else {
+                btn.textContent = '✅ Bereit';
+                btn.classList.remove('bg-gray-500', 'cursor-not-allowed');
+                btn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                btn.disabled = false;
+            }
+        }
+
+        function updateUI() {
+            if (!gameState) return;
+
+            // Spieler-ID speichern
+            if (!myPlayerId && gameState.players.length > 0) {
+                myPlayerId = gameState.players[gameState.players.length - 1].id;
+            }
+
+            // Update Status
+            updateStatus();
+
+            // Update Dealer
+            updateDealer();
+
+            // Update Spieler
+            updatePlayers();
+
+            // Update Sections
+            updateSections();
+
+            // Update Action Buttons
+            updateActionButtons();
+        }
+
+        function updateStatus() {
+            document.getElementById('player-count').textContent = `${gameState.player_count}/${gameState.max_players}`;
+            
+            const statusEl = document.getElementById('game-status');
+            switch (gameState.state) {
+                case 'waiting':
+                    statusEl.textContent = 'Warte auf Spieler...';
+                    statusEl.className = 'text-xl font-bold text-yellow-400';
+                    break;
+                case 'betting':
+                    statusEl.textContent = '💰 Einsätze platzieren';
+                    statusEl.className = 'text-xl font-bold text-blue-400';
+                    break;
+                case 'playing':
+                    statusEl.textContent = '🎮 Spiel läuft';
+                    statusEl.className = 'text-xl font-bold text-green-400';
+                    break;
+                case 'dealer_turn':
+                    statusEl.textContent = '🎩 Dealer am Zug';
+                    statusEl.className = 'text-xl font-bold text-purple-400';
+                    break;
+                case 'finished':
+                    statusEl.textContent = '✅ Runde beendet';
+                    statusEl.className = 'text-xl font-bold text-white';
+                    break;
+            }
+        }
+
+        function updateDealer() {
+            const dealerCards = document.getElementById('dealer-cards');
+            const dealerValue = document.getElementById('dealer-value');
+
+            dealerCards.innerHTML = gameState.dealer.cards.map(card => {
+                const isRed = ['♥', '♦'].includes(card.suit);
+                const colorClass = isRed ? 'card-red' : 'card-black';
+                return `<span class="card ${colorClass}">${card.rank}${card.suit}</span>`;
+            }).join('');
+
+            if (gameState.dealer.value === '?') {
+                dealerValue.textContent = 'Wert: ?';
+            } else {
+                dealerValue.textContent = `Wert: ${gameState.dealer.value}${gameState.dealer.is_bust ? ' - BUST! 💥' : ''}`;
+            }
+        }
+
+        function updatePlayers() {
+            const container = document.getElementById('players-container');
+            container.innerHTML = '';
+
+            gameState.players.forEach(player => {
+                const playerDiv = document.createElement('div');
+                const isMe = player.id === myPlayerId;
+                const isCurrentPlayer = player.id === gameState.current_player_id;
+                
+                let borderClass = '';
+                if (isCurrentPlayer && gameState.state === 'playing') {
+                    borderClass = 'border-4 border-yellow-400 pulse';
+                } else if (isMe) {
+                    borderClass = 'border-2 border-blue-400';
+                }
+
+                playerDiv.className = `bg-white/10 backdrop-blur-sm rounded-xl p-6 ${borderClass}`;
+
+                let handsHTML = '';
+                if (player.hands.length > 0) {
+                    player.hands.forEach((hand, index) => {
+                        const isActiveHand = isCurrentPlayer && index === player.current_hand_index && gameState.state === 'playing';
+                        const handBorderClass = isActiveHand ? 'border-2 border-yellow-300' : '';
+
+                        const cardsHTML = hand.cards.map(card => {
+                            const isRed = ['♥', '♦'].includes(card.suit);
+                            const colorClass = isRed ? 'card-red' : 'card-black';
+                            return `<span class="card ${colorClass}">${card.rank}${card.suit}</span>`;
+                        }).join('');
+
+                        let statusText = '';
+                        if (hand.is_blackjack) {
+                            statusText = '<span class="text-yellow-400 font-bold">BLACKJACK! 🎉</span>';
+                        } else if (hand.is_bust) {
+                            statusText = '<span class="text-red-400 font-bold">BUST! 💥</span>';
+                        } else if (hand.is_finished) {
+                            statusText = '<span class="text-gray-400 font-bold">Beendet ✓</span>';
+                        } else if (isActiveHand) {
+                            statusText = '<span class="text-yellow-400 font-bold pulse">⏳ Am Zug</span>';
+                        }
+
+                        handsHTML += `
+                            <div class="bg-white/5 rounded-lg p-4 mb-4 ${handBorderClass}">
+                                <div class="text-white text-lg mb-2">
+                                    Hand ${index + 1} - Einsatz: ${hand.bet} €
+                                </div>
+                                <div class="text-center mb-2">${cardsHTML}</div>
+                                <div class="text-center text-xl font-semibold text-white">
+                                    Wert: ${hand.value} ${statusText}
+                                </div>
+                            </div>
+                        `;
+                    });
+                } else if (gameState.state === 'betting') {
+                    handsHTML = '<div class="text-center text-white text-lg italic">Warte auf Einsatz...</div>';
+                }
+
+                let readyBadge = '';
+                if (gameState.state === 'waiting') {
+                    readyBadge = player.is_ready 
+                        ? '<span class="bg-green-500 text-white px-3 py-1 rounded-full text-sm font-bold">✓ Bereit</span>'
+                        : '<span class="bg-gray-500 text-white px-3 py-1 rounded-full text-sm font-bold">⏳ Wartet</span>';
+                }
+
+                playerDiv.innerHTML = `
+                    <div class="flex justify-between items-center mb-4">
+                        <div class="flex items-center gap-3">
+                            <h3 class="text-2xl font-bold text-white">
+                                ${player.is_bot ? '🤖' : '👤'} ${player.name}
+                                ${isMe ? '<span class="text-sm text-blue-400">(Du)</span>' : ''}
+                            </h3>
+                            ${readyBadge}
+                        </div>
+                        <div class="text-xl font-bold text-yellow-400">
+                            💰 ${player.balance} €
+                        </div>
+                    </div>
+                    ${handsHTML}
+                `;
+
+                container.appendChild(playerDiv);
+            });
+        }
+
+        function updateSections() {
+            const readySection = document.getElementById('ready-section');
+            const bettingSection = document.getElementById('betting-section');
+            const actionsSection = document.getElementById('actions-section');
+            const resultsSection = document.getElementById('results-section');
+
+            readySection.classList.toggle('hidden', gameState.state !== 'waiting');
+            bettingSection.classList.toggle('hidden', gameState.state !== 'betting');
+            actionsSection.classList.toggle('hidden', gameState.state !== 'playing');
+            resultsSection.classList.toggle('hidden', gameState.state !== 'finished');
+
+            // Zeige Betting nur wenn ich noch nicht gesetzt habe
+            if (gameState.state === 'betting') {
+                const myPlayer = gameState.players.find(p => p.id === myPlayerId);
+                if (myPlayer && myPlayer.hands.length > 0) {
+                    bettingSection.classList.add('hidden');
+                }
+            }
+        }
+
+        function updateActionButtons() {
+            if (gameState.state !== 'playing') return;
+
+            const myPlayer = gameState.players.find(p => p.id === myPlayerId);
+            const isMyTurn = gameState.current_player_id === myPlayerId;
+            
+            const turnIndicator = document.getElementById('turn-indicator').querySelector('span');
+            if (isMyTurn && myPlayer) {
+                turnIndicator.textContent = '⭐ Du bist am Zug! ⭐';
+            } else {
+                const currentPlayer = gameState.players.find(p => p.id === gameState.current_player_id);
+                turnIndicator.textContent = currentPlayer ? `⏳ ${currentPlayer.name} ist am Zug...` : '';
+            }
+
+            if (!isMyTurn || !myPlayer) {
+                document.getElementById('hit-btn').disabled = true;
+                document.getElementById('stand-btn').disabled = true;
+                document.getElementById('double-btn').disabled = true;
+                document.getElementById('split-btn').disabled = true;
+                return;
+            }
+
+            const currentHand = myPlayer.hands[myPlayer.current_hand_index];
+            if (!currentHand) return;
+
+            document.getElementById('hit-btn').disabled = currentHand.is_finished;
+            document.getElementById('stand-btn').disabled = currentHand.is_finished;
+            document.getElementById('hit-btn').disabled = currentHand.is_blackjack;
+            
+
+            const canDouble = currentHand.cards.length === 2 && 
+                             myPlayer.balance >= currentHand.bet &&
+                             !currentHand.is_finished;
+            document.getElementById('double-btn').disabled = !canDouble || currentHand.is_blackjack;
+
+            const canSplit = currentHand.cards.length === 2 && 
+                            currentHand.cards[0].rank === currentHand.cards[1].rank &&
+                            myPlayer.balance >= currentHand.bet &&
+                            !currentHand.is_finished;
+            document.getElementById('split-btn').disabled = !canSplit;
+        }
+
+        function setBet(amount) {
+            document.getElementById('bet-input').value = amount;
+        }
+
+        function placeBet() {
+            const betInput = document.getElementById('bet-input');
+            const bet = parseInt(betInput.value);
+
+            const myPlayer = gameState.players.find(p => p.id === myPlayerId);
+            if (bet > 0 && myPlayer && myPlayer.balance >= bet) {
+                socket.emit('place_bet', { bet: bet });
+            } else {
+                alert('Ungültiger Einsatz oder nicht genug Guthaben!');
+            }
+        }
+
+        function hit() {
+            socket.emit('hit');
+        }
+
+        function stand() {
+            socket.emit('stand');
+        }
+
+        function double() {
+            socket.emit('double');
+        }
+
+        function split() {
+            socket.emit('split');
+        }
+
+        function newRound() {
+            socket.emit('new_round');
+            isReady = false;
+        }
+
+        function showResults(results) {
+            const container = document.getElementById('results-container');
+            container.innerHTML = '';
+
+            results.forEach(result => {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = 'text-center text-xl font-bold';
+
+                let color = 'text-white';
+                let emoji = '➖';
+                
+                if (result.result === 'gewonnen') {
+                    color = 'text-green-400';
+                    emoji = '✅';
+                } else if (result.result === 'verloren') {
+                    color = 'text-red-400';
+                    emoji = '❌';
+                } else if (result.result === 'blackjack') {
+                    color = 'text-yellow-400';
+                    emoji = '🎰';
+                } else if (result.result === 'unentschieden') {
+                    color = 'text-blue-400';
+                    emoji = '🤝';
+                }
+
+                resultDiv.className += ` ${color}`;
+                const handText = result.hand_index > 0 ? ` (Hand ${result.hand_index + 1})` : '';
+                resultDiv.textContent = `${emoji} ${result.player_name}${handText}: ${result.result.toUpperCase()} - Einsatz: ${result.bet} € | Gewinn: ${result.winnings} €`;
+
+                container.appendChild(resultDiv);
+            });
+        }
+
+        document.getElementById('bet-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                placeBet();
+            }
+        });
+
+        document.getElementById('player-name-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                joinGame();
+            }
+        });
+
+    </script>
+</body>
+</html>
