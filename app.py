@@ -1,11 +1,18 @@
-from flask import Flask, render_template, request, session
+from flask import Flask, json, render_template, request, session
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import random
 import uuid
+import redis, os
+import dotenv
+
+dotenv.load_dotenv()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'bvzbujcnindinicbsivvss'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+r = redis.Redis.from_url(os.environ["UPSTASH_REDIS_URL"], decode_responses=True)
+
 
 # Kartenwerte und Symbole
 SUITS = ['♠', '♥', '♦', '♣']
@@ -167,6 +174,44 @@ class Game:
         self.current_player_index = 0
         self.state = 'waiting'  # waiting, betting, playing, dealer_turn, finished
     
+    def to_redis(self):
+        return json.dumps({
+        'room_id': self.room_id,
+        'state': self.state,
+        'current_player_index': self.current_player_index,
+        'player_order': self.player_order,
+        'players': {pid: p.to_dict() for pid, p in self.players.items()},
+        'dealer': self.dealer.to_dict(False),
+        'deck': [card.to_dict() for card in self.deck.cards],
+        })
+    
+    @classmethod
+    def from_redis(cls, data):
+        raw = json.loads(data)
+        game = cls(raw['room_id'])
+        game.state = raw['state']
+        game.current_player_index = raw['current_player_index']
+        game.player_order = raw['player_order']
+
+        game.deck.cards = [Card(**c) for c in raw['deck']]
+        game.dealer.hand.cards = [Card(**c) for c in raw['dealer']['cards']]
+
+        for pid, pdata in raw['players'].items():
+            player = Player(pdata['name'], pid, pdata['balance'], pdata['is_bot'])
+            player.is_ready = pdata['is_ready']
+            player.is_active = pdata['is_active']
+            for h in pdata['hands']:
+                hand = Hand()
+                hand.bet = h['bet']
+                hand.cards = [Card(**c) for c in h['cards']]
+                hand.is_finished = h['is_finished']
+                player.hands.append(hand)
+            game.players[pid] = player
+
+        return game
+
+
+
     def add_player(self, player_id, name, balance=1000, is_bot=False):
         if len(self.players) >= MAX_PLAYERS:
             return None
@@ -316,13 +361,17 @@ class Game:
             'all_ready': self.all_players_ready()
         }
 
-# Globale Spiele-Verwaltung
-games = {}
 
 def get_or_create_game(room_id):
-    if room_id not in games:
-        games[room_id] = Game(room_id)
-    return games[room_id]
+    key = f"game:{room_id}"
+    data = r.get(key)
+    if data:
+        return Game.from_redis(data)
+
+    game = Game(room_id)
+    r.set(key, game.to_redis())
+    return game
+
 
 @app.route('/')
 def index():
@@ -332,50 +381,56 @@ def index():
 def handle_join(data):
     room_id = data.get('room_id', 'default')
     player_name = data.get('name', 'Spieler')
-    
-    if 'player_id' not in session:
-        session['player_id'] = str(uuid.uuid4())
-    
-    player_id = session['player_id']
-    session['room_id'] = room_id
-    
+
+    player_id = data.get('player_id')
+    if not player_id:
+        emit('error', {'message': 'player_id missing'})
+        return
+
     game = get_or_create_game(room_id)
-    
-    # Spieler hinzufügen oder bestehenden Spieler laden
+
+    # Add or load player
     player = game.add_player(player_id, player_name)
-    
     if player is None:
         emit('error', {'message': 'Tisch ist voll! Maximal 7 Spieler erlaubt.'})
         return
-    
+
     join_room(room_id)
-    
+
+    r.set(f"game:{room_id}", game.to_redis())
+
     emit('game_state', game.to_dict(), room=room_id)
-    emit('player_joined', {'player_name': player_name, 'player_count': len(game.players)}, room=room_id)
+    emit(
+        'player_joined',
+        {'player_name': player_name, 'player_count': len(game.players)},
+        room=room_id
+    )
 
 @socketio.on('disconnect')
-def handle_disconnect():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
-    if room_id and player_id and room_id in games:
-        game = games[room_id]
+def handle_disconnect(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
+    if room_id and player_id:
+        game = get_or_create_game(room_id)
+
         if player_id in game.players:
             player_name = game.players[player_id].name
             game.remove_player(player_id)
             
             # Wenn keine Spieler mehr da sind, lösche das Spiel
             if not game.players:
-                del games[room_id]
+                r.delete(f"game:{room_id}")
             else:
+                r.set(f"game:{room_id}", game.to_redis())
                 emit('game_state', game.to_dict(), room=room_id)
                 emit('player_left', {'player_name': player_name}, room=room_id)
 
 @socketio.on('toggle_ready')
-def handle_toggle_ready():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
+def handle_toggle_ready(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
     if not room_id or not player_id:
         return
     
@@ -389,12 +444,13 @@ def handle_toggle_ready():
         if game.state == 'waiting' and game.all_players_ready():
             game.start_betting()
         
+        r.set(f"game:{room_id}", game.to_redis())
         emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('place_bet')
 def handle_bet(data):
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
     bet = data.get('bet', 10)
     
     if not room_id or not player_id:
@@ -412,156 +468,212 @@ def handle_bet(data):
             if game.all_bets_placed():
                 game.deal_initial_cards()
             
+            r.set(f"game:{room_id}", game.to_redis())
             emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('hit')
-def handle_hit():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
+def handle_hit(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
     if not room_id or not player_id:
         return
-    
+
     game = get_or_create_game(room_id)
     current_player = game.get_current_player()
-    
-    if current_player and current_player.id == player_id:
-        hand = current_player.get_current_hand()
-        if hand and not hand.is_finished:
-            hand.add_card(game.deck.draw())
-            
-            if hand.is_bust() or hand.get_value() == 21:
-                hand.is_finished = True
-                next_hand = current_player.next_hand()
-                if not next_hand:
-                    next_player = game.next_player()
-                    if next_player is None:
-                        game.state = 'dealer_turn'
 
-            emit('game_state', game.to_dict(), room=room_id)
+    # Not your turn
+    if not current_player or current_player.id != player_id:
+        return
 
+    hand = current_player.get_current_hand()
+    if not hand or hand.is_finished:
+        return
+
+    # Player draws
+    hand.add_card(game.deck.draw())
+
+    # Hand ends on bust or 21
     if hand.is_bust() or hand.get_value() == 21:
         hand.is_finished = True
-        next_hand = current_player.next_hand()
-        if not next_hand:
-            game.next_player()
-            if next_player is None:
-                        game.state = 'dealer_turn'
 
+        # Move to next hand / player
+        if not current_player.next_hand():
+            game.next_player()
+
+    # Dealer phase
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
+
+        # Persist
+        r.set(f"game:{room_id}", game.to_redis())
+
         emit('game_state', game.to_dict(), room=room_id)
         emit('round_results', {'results': results}, room=room_id)
-    else:
-        emit('game_state', game.to_dict(), room=room_id)
+        return
+
+    # Persist normal state
+    r.set(f"game:{room_id}", game.to_redis())
+    emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('stand')
-def handle_stand():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
+def handle_stand(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
     if not room_id or not player_id:
         return
-    
+
     game = get_or_create_game(room_id)
     current_player = game.get_current_player()
-    
-    if current_player and current_player.id == player_id:
-        hand = current_player.get_current_hand()
-        if hand:
-            hand.is_finished = True
-        
-        next_hand = current_player.next_hand()
-        if not next_hand:
-            game.next_player()
-        
-        # Dealer spielt
-        if game.state == 'dealer_turn':
-            while game.dealer.should_draw():
-                game.dealer.hand.add_card(game.deck.draw())
-            
-            game.state = 'finished'
-            results = game.calculate_winnings()
-            
-            emit('game_state', game.to_dict(), room=room_id)
-            emit('round_results', {'results': results}, room=room_id)
-        else:
-            emit('game_state', game.to_dict(), room=room_id)
+
+    # Not your turn
+    if not current_player or current_player.id != player_id:
+        return
+
+    hand = current_player.get_current_hand()
+    if not hand or hand.is_finished:
+        return
+
+    # Finish current hand
+    hand.is_finished = True
+
+    # Move to next hand / player
+    if not current_player.next_hand():
+        game.next_player()
+
+    # Dealer phase
+    if game.state == 'dealer_turn':
+        results = resolve_dealer_and_finish(game)
+
+        r.set(f"game:{room_id}", game.to_redis())
+        emit('game_state', game.to_dict(), room=room_id)
+        emit('round_results', {'results': results}, room=room_id)
+        return
+
+    # Persist normal state
+    r.set(f"game:{room_id}", game.to_redis())
+    emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('double')
-def handle_double():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
+def handle_double(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
     if not room_id or not player_id:
         return
-    
+
     game = get_or_create_game(room_id)
     current_player = game.get_current_player()
-    
-    if current_player and current_player.id == player_id:
-        hand = current_player.get_current_hand()
-        if hand and hand.can_double() and current_player.balance >= hand.bet:
-            current_player.balance -= hand.bet
-            hand.bet *= 2
-            hand.is_doubled = True
-            hand.add_card(game.deck.draw())
-            hand.is_finished = True
-            
-            next_hand = current_player.next_hand()
-            if not next_hand:
-                game.next_player()
-            
-            if game.state == 'dealer_turn':
-                while game.dealer.should_draw():
-                    game.dealer.hand.add_card(game.deck.draw())
-                
-                game.state = 'finished'
-                results = game.calculate_winnings()
-                
-                emit('game_state', game.to_dict(), room=room_id)
-                emit('round_results', {'results': results}, room=room_id)
-            else:
-                emit('game_state', game.to_dict(), room=room_id)
+
+    # Not your turn
+    if not current_player or current_player.id != player_id:
+        return
+
+    hand = current_player.get_current_hand()
+    if not hand or not hand.can_double() or current_player.balance < hand.bet:
+        return
+
+    # Apply double
+    current_player.balance -= hand.bet
+    hand.bet *= 2
+    hand.is_doubled = True
+
+    hand.add_card(game.deck.draw())
+    hand.is_finished = True
+
+    # Advance turn
+    if not current_player.next_hand():
+        game.next_player()
+
+    # Dealer phase
+    if game.state == 'dealer_turn':
+        results = resolve_dealer_and_finish(game)
+
+        r.set(f"game:{room_id}", game.to_redis())
+        emit('game_state', game.to_dict(), room=room_id)
+        emit('round_results', {'results': results}, room=room_id)
+        return
+
+    # Persist normal state
+    r.set(f"game:{room_id}", game.to_redis())
+    emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('split')
-def handle_split():
-    room_id = session.get('room_id')
-    player_id = session.get('player_id')
-    
+def handle_split(data):
+    room_id = data.get('room_id')
+    player_id = data.get('player_id')
+
     if not room_id or not player_id:
         return
-    
+
     game = get_or_create_game(room_id)
     current_player = game.get_current_player()
-    
-    if current_player and current_player.id == player_id:
-        hand = current_player.get_current_hand()
-        if hand and hand.can_split() and current_player.balance >= hand.bet:
-            new_hand = Hand()
-            new_hand.bet = hand.bet
-            new_hand.is_split = True
-            new_hand.add_card(hand.cards.pop())
-            
-            hand.add_card(game.deck.draw())
-            new_hand.add_card(game.deck.draw())
-            
-            current_player.hands.insert(current_player.current_hand_index + 1, new_hand)
-            current_player.balance -= hand.bet
-            
-            emit('game_state', game.to_dict(), room=room_id)
+
+    # Not your turn or wrong phase
+    if (
+        game.state != 'playing'
+        or not current_player
+        or current_player.id != player_id
+    ):
+        return
+
+    hand = current_player.get_current_hand()
+
+    # Validate split conditions
+    if (
+        not hand
+        or hand.is_finished
+        or not hand.can_split()
+        or current_player.balance < hand.bet
+    ):
+        return
+
+    # Create split hand
+    new_hand = Hand()
+    new_hand.bet = hand.bet
+    new_hand.is_split = True
+
+    # Move one card to new hand
+    new_hand.add_card(hand.cards.pop())
+
+    # Draw one card for each hand
+    hand.add_card(game.deck.draw())
+    new_hand.add_card(game.deck.draw())
+
+    # Ensure both hands are active
+    hand.is_finished = False
+    new_hand.is_finished = False
+
+    # Insert new hand directly after current one
+    insert_index = current_player.current_hand_index + 1
+    current_player.hands.insert(insert_index, new_hand)
+
+    # Deduct balance
+    current_player.balance -= hand.bet
+
+    # Persist and notify
+    r.set(f"game:{room_id}", game.to_redis())
+    emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('new_round')
-def handle_new_round():
-    room_id = session.get('room_id')
-    
+def handle_new_round(data):
+    room_id = data.get('room_id')
+
     if not room_id:
         return
-    
+
     game = get_or_create_game(room_id)
+
+    # Only allow reset after round finished
+    if game.state != 'finished':
+        return
+
     game.reset_round()
-    
+
+    r.set(f"game:{room_id}", game.to_redis())
     emit('game_state', game.to_dict(), room=room_id)
+
 
 if __name__ == '__main__':
     socketio.run(app, host="0.0.0.0", port=5000)

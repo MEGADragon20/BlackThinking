@@ -250,9 +250,17 @@
         function joinGame() {
             const name = document.getElementById('player-name-input').value.trim() || 'Spieler';
             const roomId = document.getElementById('room-id-input').value.trim() || 'default';
-            
-            socket.emit('join_game', { name: name, room_id: roomId });
-            
+            let playerId = localStorage.getItem("player_id");
+            if (!playerId) {
+                if (crypto && crypto.randomUUID) {
+                    playerId = crypto.randomUUID();
+                } else {
+                    // fallback
+                    playerId = 'player-' + Math.floor(Math.random() * 1e9);
+                }
+                localStorage.setItem("player_id", playerId);
+            }
+            socket.emit('join_game', { name: name, room_id: roomId, player_id: playerId });
             document.getElementById('login-section').classList.add('hidden');
             document.getElementById('game-container').classList.remove('hidden');
             document.getElementById('room-display').textContent = roomId;
@@ -260,8 +268,8 @@
 
         function toggleReady() {
             isReady = !isReady;
-            socket.emit('toggle_ready');
-            
+            socket.emit('toggle_ready', { room_id: gameState.room_id, player_id: myPlayerId });
+
             const btn = document.getElementById('ready-btn');
             if (isReady) {
                 btn.textContent = '⏳ Warte...';
@@ -280,9 +288,10 @@
             if (!gameState) return;
 
             // Spieler-ID speichern
-            if (!myPlayerId && gameState.players.length > 0) {
-                myPlayerId = gameState.players[gameState.players.length - 1].id;
+            if (!myPlayerId) {
+                myPlayerId = localStorage.getItem("player_id");
             }
+
 
             // Update Status
             updateStatus();
@@ -474,9 +483,8 @@
             const currentHand = myPlayer.hands[myPlayer.current_hand_index];
             if (!currentHand) return;
 
-            document.getElementById('hit-btn').disabled = currentHand.is_finished;
+            document.getElementById('hit-btn').disabled = currentHand.is_finished || currentHand.is_blackjack;
             document.getElementById('stand-btn').disabled = currentHand.is_finished;
-            document.getElementById('hit-btn').disabled = currentHand.is_blackjack;
             
 
             const canDouble = currentHand.cards.length === 2 && 
@@ -501,30 +509,30 @@
 
             const myPlayer = gameState.players.find(p => p.id === myPlayerId);
             if (bet > 0 && myPlayer && myPlayer.balance >= bet) {
-                socket.emit('place_bet', { bet: bet });
+                socket.emit('place_bet', { bet: bet, room_id: gameState.room_id, player_id: myPlayerId });
             } else {
                 alert('Ungültiger Einsatz oder nicht genug Guthaben!');
             }
         }
 
         function hit() {
-            socket.emit('hit');
+            socket.emit('hit', { room_id: gameState.room_id, player_id: myPlayerId });
         }
 
         function stand() {
-            socket.emit('stand');
+            socket.emit('stand', { room_id: gameState.room_id, player_id: myPlayerId });
         }
 
         function double() {
-            socket.emit('double');
+            socket.emit('double', { room_id: gameState.room_id, player_id: myPlayerId });
         }
 
         function split() {
-            socket.emit('split');
+            socket.emit('split', { room_id: gameState.room_id, player_id: myPlayerId });
         }
 
         function newRound() {
-            socket.emit('new_round');
+            socket.emit('new_round', { room_id: gameState.room_id});
             isReady = false;
         }
 
