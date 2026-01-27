@@ -121,7 +121,10 @@ class Player:
     
     def next_hand(self):
         self.current_hand_index += 1
-        return self.get_current_hand()
+        if self.current_hand_index >= len(self.hands):
+            return None
+        return self.hands[self.current_hand_index]
+
     
     def reset_hands(self):
         self.hands = []
@@ -193,6 +196,7 @@ class Game:
         game.current_player_index = raw['current_player_index']
         game.player_order = raw['player_order']
 
+
         game.deck.cards = [Card(**c) for c in raw['deck']]
         game.dealer.hand.cards = [Card(**c) for c in raw['dealer']['cards']]
 
@@ -200,6 +204,7 @@ class Game:
             player = Player(pdata['name'], pid, pdata['balance'], pdata['is_bot'])
             player.is_ready = pdata['is_ready']
             player.is_active = pdata['is_active']
+            player.current_hand_index = pdata.get('current_hand_index', 0)
             for h in pdata['hands']:
                 hand = Hand()
                 hand.bet = h['bet']
@@ -263,12 +268,6 @@ class Game:
                     if hand:
                         hand.add_card(self.deck.draw())
                         hand.add_card(self.deck.draw())
-                    if hand.is_blackjack():
-                        print("Blackjack!")
-                    #    hand.is_finished = True
-                    #    next_player = self.next_player()
-                    #    if next_player is None:
-                    #        self.state = 'dealer_turn'
 
             self.dealer.hand.add_card(self.deck.draw())
             self.dealer.hand.add_card(self.deck.draw())
@@ -397,6 +396,12 @@ def handle_join(data):
 
     join_room(room_id)
 
+    # Store socket -> player mapping in Redis
+    r.hset(f"socket:{request.sid}", mapping={
+        "room_id": room_id,
+        "player_id": player_id
+    })
+
     r.set(f"game:{room_id}", game.to_redis())
 
     emit('game_state', game.to_dict(), room=room_id)
@@ -406,25 +411,36 @@ def handle_join(data):
         room=room_id
     )
 
+
 @socketio.on('disconnect')
-def handle_disconnect(data):
-    room_id = data.get('room_id')
-    player_id = data.get('player_id')
+def handle_disconnect():
+    sid = request.sid
 
-    if room_id and player_id:
-        game = get_or_create_game(room_id)
+    user_data = r.hgetall(f"socket:{sid}")
+    if not user_data:
+        return
 
-        if player_id in game.players:
-            player_name = game.players[player_id].name
-            game.remove_player(player_id)
-            
-            # Wenn keine Spieler mehr da sind, lösche das Spiel
-            if not game.players:
-                r.delete(f"game:{room_id}")
-            else:
-                r.set(f"game:{room_id}", game.to_redis())
-                emit('game_state', game.to_dict(), room=room_id)
-                emit('player_left', {'player_name': player_name}, room=room_id)
+    room_id = user_data.get("room_id")
+    player_id = user_data.get("player_id")
+
+    if not room_id or not player_id:
+        return
+
+    game = get_or_create_game(room_id)
+
+    if player_id in game.players:
+        player_name = game.players[player_id].name
+        game.remove_player(player_id)
+
+        if not game.players:
+            r.delete(f"game:{room_id}")
+        else:
+            r.set(f"game:{room_id}", game.to_redis())
+            emit('game_state', game.to_dict(), room=room_id)
+            emit('player_left', {'player_name': player_name}, room=room_id)
+
+    # Cleanup socket mapping
+    r.delete(f"socket:{sid}")
 
 @socketio.on('toggle_ready')
 def handle_toggle_ready(data):
@@ -522,6 +538,7 @@ def handle_stand(data):
     player_id = data.get('player_id')
 
     if not room_id or not player_id:
+        print("Invalid room_id or player_id")
         return
 
     game = get_or_create_game(room_id)
@@ -529,16 +546,21 @@ def handle_stand(data):
 
     # Not your turn
     if not current_player or current_player.id != player_id:
+        print("Not your turn")
         return
 
     hand = current_player.get_current_hand()
+    print(hand.cards)
+    print("Is finished", hand.is_finished)
     if not hand or hand.is_finished:
+        print("Invalid hand state")
+        print(hand.is_finished)
+        print("Player's current hand:", current_player.get_current_hand().cards)
+        print("current hand index:", current_player.current_hand_index)
         return
-
-    # Finish current hand
     hand.is_finished = True
 
-    # Move to next hand / player
+# Move to next hand / player
     if not current_player.next_hand():
         game.next_player()
 
