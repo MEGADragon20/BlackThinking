@@ -74,7 +74,7 @@ y = [0, 0, 0, 1]
 
 class Perceptron:
     def __init__(self, n, learning_rate=0.01):
-        self.weights = [1 for _ in range(n+1)]
+        self.weights = np.ones(n + 1)
         self.learning_rate = learning_rate
 
     def activate(self, x):
@@ -93,6 +93,35 @@ class Perceptron:
         prediction = self.predict(x)
         error = y - prediction
         self.weights += self.learning_rate * error * np.hstack(([1], x))
+
+class Layer:
+    def __init__(self, n_in, n_out):
+        self.W = np.random.randn((n_out, n_in + 1))*0.1
+
+    @staticmethod 
+    def sigmoid(z):
+        return 1 / (1 + np.exp(-z))
+
+    def forward(self, x):
+        return self.sigmoid(self.W @ np.hstack((x,[1])))
+class OutputLayer(Layer):
+    def __init__(self, n_in):
+        super().__init__(n_in, 1)
+
+class Network:
+    def __init__(self, n_in, n_hidden, m_hidden = 1):
+        self.n_in = n_in
+        self.hidden = Layer(n_in, n_hidden)
+        self.output = OutputLayer(n_hidden)
+
+    def y_hat(self, x):
+        return self.output.forward(self.hidden.forward(x))
+
+    def y(self, x):
+        return round(self.y_hat(x))
+
+    def error(self, x):
+        return (self.y(x) - self.y_hat(x))**2
 
 a = Perceptron(2)
 a.train(X, y)
