@@ -1,0 +1,217 @@
+import numpy as np
+import random
+
+DECK = [str(i) for i in range(2, 10)] + ['J', 'Q', 'K', 'A']*4*4
+
+def value(string):
+    if string in ["J", "Q", "K"]:
+        return 10
+    elif string == "A":
+        return 11
+    else:
+        return int(string)
+
+def draw(deck):
+    card = random.choice(deck)
+    deck.remove(card)
+    return card
+
+def count(hand):
+    total = sum(value(card) for card in hand)
+    aces = sum(1 for card in hand if card == "A")
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+    return total
+
+def count_lows(deck):
+    return sum(1 for card in deck if value(card) < 7)
+
+def count_highs(deck):
+    return sum(1 for card in deck if value(card) > 9)
+
+def create_training_data():
+    """
+    Simulate one complete hand where network makes decisions at each step.
+    Returns list of (state, decision, cards_drawn)
+    """
+    deck = DECK.copy()
+    random.shuffle(deck)
+    
+    # Initial hand and dealer card
+    hand = [draw(deck), draw(deck)]
+    dealer_card = draw(deck)
+    
+    # Simulate what the FINAL dealer outcome would be
+    dealer_hand = [dealer_card]
+    while count(dealer_hand) < 17:
+        dealer_hand.append(draw(deck))
+    final_dealer_value = count(dealer_hand)
+    
+    training_examples = []
+    
+    # Network makes decisions until it stands or busts
+    step = 0
+    while count(hand) <= 21 and step < 10:  # Max 10 cards to be safe
+        hand_value = count(hand)
+        
+        # Simulate what happens if we hit
+        deck_copy = deck.copy()
+        next_card = draw(deck_copy)
+        hand_if_hit = hand + [next_card]
+        hand_value_if_hit = count(hand_if_hit)
+        
+        # Determine best decision
+        # If we hit and bust, that's bad
+        if hand_value_if_hit > 21:
+            best_decision = 0  # STAND
+        # If hitting improves our hand relative to dealer, hit
+        elif hand_value_if_hit > final_dealer_value:
+            best_decision = 1  # HIT
+        # If standing is already better than dealer, stand
+        elif hand_value > final_dealer_value:
+            best_decision = 0  # STAND
+        # Otherwise, hit to try to improve
+        else:
+            best_decision = 1  # HIT
+        
+        # Create feature vector from current state
+        delta_deck = count_highs(hand) - count_lows(hand)
+        progress_deck = (len(DECK) - len(deck)) / len(DECK)
+        
+        x = [hand_value, value(dealer_card), len(hand), delta_deck, progress_deck]
+        
+        training_examples.append((x, best_decision, hand, next_card if best_decision == 1 else None))
+        
+        # If decision is to stand, stop
+        if best_decision == 0:
+            break
+        
+        # Otherwise, actually draw the card
+        hand.append(draw(deck))
+        step += 1
+    
+    return training_examples
+
+def create_training_dataset(size=500):
+    """Generate training data from multiple complete hands"""
+    X, y = [], []
+    for _ in range(size):
+        examples = create_training_data()
+        for x, decision, hand, next_card in examples:
+            X.append(x)
+            y.append(decision)
+    
+    return np.array(X), np.array(y)
+
+X, Y = create_training_dataset(1000)
+
+# Normalize features
+X_mean, X_std = X.mean(axis=0), X.std(axis=0) + 1e-8
+X = (X - X_mean) / X_std
+
+class Layer:
+    def __init__(self, n_in, n_out):
+        self.W = np.random.randn(n_out, n_in + 1) * 0.01
+
+    @staticmethod
+    def sigmoid(z):
+        return 1 / (1 + np.exp(-np.clip(z, -500, 500)))
+
+    def forward(self, x):
+        self.x = np.hstack((x, [1]))
+        self.z = self.W @ self.x
+        self.a = self.sigmoid(self.z)
+        return self.a
+
+    def backward(self, grad, lr):
+        dz = grad * self.a * (1 - self.a)
+        self.W -= lr * dz[:, None] @ self.x[None, :]
+        return self.W[:, :-1].T @ dz
+
+class Network:
+    def __init__(self, n_in, n_hidden):
+        self.hidden = Layer(n_in, n_hidden)
+        self.output = Layer(n_hidden, 1)
+
+    def forward(self, x):
+        h = self.hidden.forward(x)
+        y_hat = self.output.forward(h)
+        return y_hat[0]
+
+    @staticmethod
+    def loss(y, y_hat):
+        return (y - y_hat) ** 2
+
+    @staticmethod
+    def loss_grad(y, y_hat):
+        return 2 * (y_hat - y)
+
+    def train(self, X, Y, lr=0.1, epochs=1000):
+        for epoch in range(epochs):
+            total_loss = 0
+            for x, y in zip(X, Y):
+                y_hat = self.forward(x)
+                total_loss += self.loss(y, y_hat)
+                grad = self.loss_grad(y, y_hat)
+                grad = self.output.backward(np.array([grad]), lr)
+                self.hidden.backward(grad, lr)
+
+            if epoch % 500 == 0:
+                print(f"epoch {epoch}, loss {total_loss / len(X):.6f}")
+
+    def predict(self, x):
+        return round(self.forward(x))
+
+# Train
+net = Network(n_in=5, n_hidden=8)
+net.train(X, Y, lr=0.5, epochs=1500)
+
+# print sample 
+print("\nSample predictions:")
+for i, x in enumerate(X[:100]):
+    print(f"Input: {x}, Prediction: {net.predict(x)}, Actual: {Y[i]}")
+
+# Now play a sample game where network makes decisions
+for _ in range(10):
+    print("\n" + "="*60)
+    print("PLAYING A SAMPLE GAME")
+    print("="*60)
+
+deck = DECK.copy()
+random.shuffle(deck)
+
+hand = [draw(deck), draw(deck)]
+dealer_card = draw(deck)
+
+print(f"Your hand: {hand} (value: {count(hand)})")
+print(f"Dealer shows: {dealer_card}")
+print()
+
+move_count = 0
+while count(hand) <= 21 and move_count < 10:
+    hand_value = count(hand)
+    
+    # Create features for network
+    delta_deck = count_highs(hand) - count_lows(hand)
+    progress_deck = (len(DECK) - len(deck)) / len(DECK)
+    x = np.array([hand_value, value(dealer_card), len(hand), delta_deck, progress_deck])
+    x_norm = (x - X_mean) / X_std
+    
+    decision = net.predict(x_norm)
+    
+    if decision == 1:
+        print(f"Move {move_count + 1}: Network says HIT")
+        card = draw(deck)
+        hand.append(card)
+        print(f"  Drew: {card}, Hand now: {hand} (value: {count(hand)})")
+    else:
+        print(f"Move {move_count + 1}: Network says STAND")
+        print(f"  Final hand: {hand} (value: {count(hand)})")
+        break
+    
+    print()
+    move_count += 1
+
+if count(hand) > 21:
+    print("BUST! Hand value exceeded 21")
