@@ -1,7 +1,7 @@
 import numpy as np
 import random
 
-DECK = [str(i) for i in range(2, 10)] + ['J', 'Q', 'K', 'A']
+DECK = [str(i) for i in range(2, 10)] + ['J', 'Q', 'K', 'A']*4*4
 
 def value(string):
     if string == "J" or string == "Q" or string == "K":
@@ -32,6 +32,20 @@ def count(hand):
             total -= 10
     return total
 
+def count_lows(deck):
+    total = 0
+    for card in deck:
+        if value(card) < 7:
+            total += 1
+    return total
+
+def count_highs(deck):
+    total = 0
+    for card in deck:
+        if value(card) > 9:
+            total += 1
+    return total
+
 def create_training_data() -> tuple[list[float], int]:
     deck = DECK.copy()
     random.shuffle(deck)
@@ -40,89 +54,93 @@ def create_training_data() -> tuple[list[float], int]:
     dealer_card = draw(deck)
     remove_pivot = random.randint(0, len(deck)-3) # leave 3 cause maybe you'll need to draw more idk how to do this    
     drawn_deck = deck[:remove_pivot]
-    sum_drawn_deck = 0
-    for i in drawn_deck:
-        sum_drawn_deck += value(i)
+    delta_drawn_deck = count_highs(drawn_deck) - count_lows(drawn_deck)
     progress_deck = len(drawn_deck) / (len(DECK))
-    x = [sum_hand, progress_deck, value(dealer_card), sum_drawn_deck]
+    x = [sum_hand, progress_deck, value(dealer_card), delta_drawn_deck]
 
     deck = deck[remove_pivot:]
     hand_final = hand + [draw(deck)]
     sum_final = count(hand_final)
-    y = 0 if sum_final > 21 else 1 # 1 meint ziehen, 0 meint nicht ziehen. 
+    sum_dealer = count([dealer_card])
+    y = 0 if sum_final > 21 or sum_final < sum_dealer else 1 # 1 meint ziehen, 0 meint nicht ziehen. 
     return x, y
 
 def create_training_dataset() -> tuple[list[list[float]], list[int]]:
     X = []
     y = []
-    for i in range(20):
+    for i in range(100):
         x, label = create_training_data()
         X.append(x)
         y.append(label)
     return X, y
 
-print(create_training_dataset())
+X, y = create_training_dataset()
+X = np.array(X)
+Y = np.array(y)
 
-X = [
-    [0, 0],
-    [1, 0],
-    [0, 1],
-    [1, 1]
-]
-y = [0, 0, 0, 1]  
-
-
-class Perceptron:
-    def __init__(self, n, learning_rate=0.01):
-        self.weights = np.ones(n + 1)
-        self.learning_rate = learning_rate
-
-    def activate(self, x):
-        return 1 if x > 0 else 0
-
-    def predict(self, x):
-        weighted_sum = np.dot(np.hstack(([1], x)), self.weights)
-        return self.activate(weighted_sum)
-
-    def train(self, X, y, epochs=100):
-        for _ in range(epochs):
-            for i in range(len(X)):
-                self.train_once(X[i], y[i])
-
-    def train_once(self, x, y):
-        prediction = self.predict(x)
-        error = y - prediction
-        self.weights += self.learning_rate * error * np.hstack(([1], x))
 
 class Layer:
     def __init__(self, n_in, n_out):
-        self.W = np.random.randn((n_out, n_in + 1))*0.1
+        # +1 for bias
+        self.W = np.random.randn(n_out, n_in + 1) * 0.1
 
-    @staticmethod 
+    @staticmethod
     def sigmoid(z):
         return 1 / (1 + np.exp(-z))
 
     def forward(self, x):
-        return self.sigmoid(self.W @ np.hstack((x,[1])))
-class OutputLayer(Layer):
-    def __init__(self, n_in):
-        super().__init__(n_in, 1)
+        # store input with bias
+        self.x = np.hstack((x, [1]))
+        self.z = self.W @ self.x
+        self.a = self.sigmoid(self.z)
+        return self.a
+
+    def backward(self, grad, lr):
+        # grad is dL/da
+        dz = grad * self.a * (1 - self.a)   # dL/dz
+        self.W -= lr * dz[:, None] @ self.x[None, :]
+        return self.W[:, :-1].T @ dz         # dL/dx
+
 
 class Network:
-    def __init__(self, n_in, n_hidden, m_hidden = 1):
-        self.n_in = n_in
+    def __init__(self, n_in, n_hidden):
         self.hidden = Layer(n_in, n_hidden)
-        self.output = OutputLayer(n_hidden)
+        self.output = Layer(n_hidden, 1)
 
-    def y_hat(self, x):
-        return self.output.forward(self.hidden.forward(x))
+    def forward(self, x):
+        h = self.hidden.forward(x)
+        y_hat = self.output.forward(h)
+        return y_hat[0]
 
-    def y(self, x):
-        return round(self.y_hat(x))
+    @staticmethod
+    def loss(y, y_hat):
+        return (y - y_hat) ** 2
 
-    def error(self, x):
-        return (self.y(x) - self.y_hat(x))**2
+    @staticmethod
+    def loss_grad(y, y_hat):
+        return 2 * (y_hat - y)
 
-a = Perceptron(2)
-a.train(X, y)
-print(a.weights)
+    def train(self, X, Y, lr=0.1, epochs=1000):
+        for epoch in range(epochs):
+            total_loss = 0
+
+            for x, y in zip(X, Y):
+                # forward
+                y_hat = self.forward(x)
+                total_loss += self.loss(y, y_hat)
+
+                # backward
+                grad = self.loss_grad(y, y_hat)
+                grad = self.output.backward(np.array([grad]), lr)
+                self.hidden.backward(grad, lr)
+
+            if epoch % 100 == 0:
+                print(f"epoch {epoch}, loss {total_loss / len(X)}")
+
+    def predict(self, x):
+        return round(self.forward(x))
+net = Network(n_in=4, n_hidden=4)
+net.train(X, Y, lr=0.5, epochs=10000)
+
+for x in X:
+    print(x, net.predict(x))
