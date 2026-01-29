@@ -1,7 +1,7 @@
 from flask import Flask, json, render_template, request, redirect
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import random, os, dotenv
-from hit_prod import Network, count, count_highs, count_lows
+from network import Network, count, count_highs, count_lows
 import redis
 
 dotenv.load_dotenv()
@@ -202,7 +202,7 @@ class Game:
         self.is_last_round = False
         if contains_bot > 0:
             for i in range(contains_bot):
-                self.add_player(f"bot_{i}", f"BlackThinking {i}", is_bot=True)
+                self.add_player(f"bot_{i}", f"BlackThinking", is_bot=True)
 
     def to_redis(self):
         return json.dumps({
@@ -332,15 +332,19 @@ class Game:
         
         results = []
         for player_id in self.player_order:
-            player = self.players[player_id]
-            if not player.is_active:
+            # Safety: skip players that were removed or marked inactive
+            player = self.players.get(player_id)
+            if not player or not player.is_active:
+                print(f"calculate_winnings: skipping inactive/missing player {player_id}")
                 continue
-                
+
             for hand_idx, hand in enumerate(player.hands):
+                # Capture pre-values for debug
+                before_balance = player.balance
                 hand_value = hand.get_value()
                 hand_blackjack = hand.is_blackjack()
                 hand_bust = hand.is_bust()
-                
+
                 if hand_bust:
                     result = 'verloren'
                     winnings = 0
@@ -363,7 +367,16 @@ class Game:
                 else:
                     result = 'verloren'
                     winnings = 0
-                
+
+                after_balance = player.balance
+
+                # Debug output to trace payouts (helps confirm bots get credited)
+                print(
+                    f"calculate_winnings: player={player.id} name={player.name} "
+                    f"before={before_balance} bet={hand.bet} result={result} "
+                    f"winnings={winnings} after={after_balance}"
+                )
+
                 results.append({
                     'player_id': player.id,
                     'player_name': player.name,
@@ -415,11 +428,7 @@ def place_bet(game, player, bet):
     player.add_hand(bet)
     print(f"place_bet: player={player.id} balance_after={player.balance} hands={len(player.hands)}")
 
-    # If all active players have placed bets, deal initial cards and
-    # transition to playing. In any case, advance the game so clients
-    # and bots receive the updated state and can act.
     if game.all_bets_placed():
-        print("place_bet: all bets placed, dealing cards and switching to playing")
         game.deal_initial_cards()
         game.state = 'playing'
 
@@ -506,6 +515,7 @@ def advance_game(game):
         emit('error', {"message": "Das Kartendeck ist fast leer. Dies ist die letzte Runde!"})
 
     if game.state == 'dealer_turn':
+        print("Checkpoint PP")
         results = resolve_dealer_and_finish(game)
         save_game(game)
         emit('round_results', {'results': results}, room=game.room_id)
@@ -694,7 +704,7 @@ def handle_hit(data):
         results = resolve_dealer_and_finish(game)
         
         advance_game(game)
-        
+        emit('round_results', {'results': results}, room=game.room_id)
         return
 
     # Persist normal state
@@ -731,6 +741,7 @@ def handle_stand(data):
         results = resolve_dealer_and_finish(game)
         
         advance_game(game)
+        emit('round_results', {'results': results}, room=game.room_id)
         return
 
     # Persist normal state
@@ -772,6 +783,7 @@ def handle_double(data):
         results = resolve_dealer_and_finish(game)
 
         advance_game(game)
+        emit('round_results', {'results': results}, room=game.room_id)
         return
 
     # Persist normal state

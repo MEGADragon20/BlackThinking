@@ -1,6 +1,7 @@
 import numpy as np
 import random, json
-from hit_prod import Network, train_q_learning, evaluate, count, value, draw, count_highs, count_lows, DECK, play_episode
+from hit_prod import train_q_learning, evaluate, DECK, play_episode
+from network import Network, count
 
 net = Network(n_in=6, n_hidden=32)
 train_q_learning(net, episodes=500000, lr=0.05)
