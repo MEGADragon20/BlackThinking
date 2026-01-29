@@ -1,10 +1,8 @@
 from flask import Flask, json, render_template, request, session
 from flask_socketio import SocketIO, emit, join_room, leave_room
-import random
-import uuid
-import redis, os, dotenv
+import random, os, dotenv
 from hit_prod import Network, count, count_highs, count_lows
-
+import redis
 
 dotenv.load_dotenv()
 
@@ -13,6 +11,7 @@ app.config['SECRET_KEY'] = 'bvzbujcnindinicbsivvss'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 r = redis.Redis.from_url(os.environ["UPSTASH_REDIS_URL"], decode_responses=True)
+r.flushall()
 
 with open("hit.json", "r") as f:
     data = json.load(f)
@@ -58,7 +57,9 @@ class Deck:
     
     def draw(self):
         if not self.cards:
-            self.__init__()
+            # Do not auto-reset the deck. Let the deck get empty over time.
+            print("Deck empty: no more cards to draw")
+            return None
         return self.cards.pop()
     
     def cards_list(self) -> list:
@@ -73,6 +74,9 @@ class Hand:
         self.is_finished = False
     
     def add_card(self, card):
+        # Ignore attempts to add a None card (deck exhausted)
+        if card is None:
+            return
         self.cards.append(card)
     
     def get_values(self) -> list:
@@ -276,9 +280,15 @@ class Game:
         return False
     
     def all_bets_placed(self):
-        return all(len(p.hands) > 0 for p in self.players.values() if p.is_active)
+        # Debug: show betting progress
+        status = {pid: len(p.hands) for pid, p in self.players.items()}
+        print("all_bets_placed check - hands per player:", status)
+        result = all(len(p.hands) > 0 for p in self.players.values() if p.is_active)
+        print("all_bets_placed ->", result)
+        return result
     
     def deal_initial_cards(self):
+        print("deal_initial_cards called. player_order:", self.player_order)
         if self.all_bets_placed():
             print("dealing intitial cards")
             self.state = 'playing'
@@ -365,7 +375,8 @@ class Game:
         return results
     
     def reset_round(self):
-        self.deck = Deck()
+        # Keep the existing deck to allow it to deplete over multiple rounds.
+        # Do not reinitialize `self.deck` here.
         self.dealer.reset()
         for player in self.players.values():
             player.reset_hands()
@@ -384,7 +395,8 @@ class Game:
             'current_player_id': current_player.id if current_player else None,
             'player_count': len(self.players),
             'max_players': MAX_PLAYERS,
-            'all_ready': self.all_players_ready()
+            'all_ready': self.all_players_ready(),
+            'deck_size': len(self.deck.cards)
         }
     
 def save_game(game):
@@ -392,17 +404,27 @@ def save_game(game):
 
 def place_bet(game, player, bet):
     if game.state != 'betting':
+        print(f"place_bet rejected: game.state={game.state} (not betting) for player={player.id}")
         return
     if player.balance < bet:
+        print(f"place_bet rejected: player={player.id} balance={player.balance} < bet={bet}")
         return
 
+    print(f"place_bet: player={player.id} name={player.name} bet={bet} balance_before={player.balance}")
     player.balance -= bet
     player.add_hand(bet)
+    print(f"place_bet: player={player.id} balance_after={player.balance} hands={len(player.hands)}")
 
+    # If all active players have placed bets, deal initial cards and
+    # transition to playing. In any case, advance the game so clients
+    # and bots receive the updated state and can act.
     if game.all_bets_placed():
+        print("place_bet: all bets placed, dealing cards and switching to playing")
         game.deal_initial_cards()
         game.state = 'playing'
-        advance_game(game)
+
+    print("place_bet: advancing game state")
+    advance_game(game)
 
 
 def hit(game, player):
@@ -422,7 +444,15 @@ def stand(game, player):
         game.next_player()
 
 def bot_place_bet(game, player):
-    bet = round(player.balance/10)
+    if player.balance <= 0:
+        bet = 0
+    else:
+        bet = round(player.balance/10)
+        if bet < 1:
+            bet = 1
+        if bet > player.balance:
+            bet = player.balance
+    print(f"bot_place_bet: bot={player.id} balance={player.balance} choosing bet={bet}")
     place_bet(game, player, bet)
 
 def bot_play_turn(game, player):
@@ -469,6 +499,7 @@ def maybe_trigger_bots(game):
 
 def advance_game(game):
     maybe_trigger_bots(game)
+    print("Cards:", len(game.deck.cards))
 
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
@@ -485,10 +516,15 @@ def get_or_create_game(room_id):
     key = f"game:{room_id}"
     data = r.get(key)
     if data:
-        return Game.from_redis(data)
+        print(f"get_or_create_game: loaded game from redis for room={room_id}")
+        game = Game.from_redis(data)
+        print(f"get_or_create_game: players={list(game.players.keys())}")
+        return game
 
+    print(f"get_or_create_game: creating new game for room={room_id}")
     game = Game(room_id)
     r.set(key, game.to_redis())
+    print(f"get_or_create_game: created game players={list(game.players.keys())}")
     return game
 
 
@@ -510,6 +546,8 @@ def handle_join(data):
 
     # Add or load player
     player = game.add_player(player_id, player_name)
+    print(f"handle_join: room={room_id} added/loaded player_id={player_id} name={player_name}")
+    print(f"handle_join: current players={list(game.players.keys())}")
     if player is None:
         emit('error', {'message': 'Tisch ist voll! Maximal 7 Spieler erlaubt.'})
         return
@@ -589,17 +627,25 @@ def handle_bet(data):
     
     if not room_id or not player_id:
         return
-    
+    print(f"handle_bet called: room={room_id} player_id={player_id} bet={bet}")
     game = get_or_create_game(room_id)
-    
+    print(f"handle_bet: game players={list(game.players.keys())}")
+
+    # If the client sent a player_id that doesn't match, try to recover
+    if player_id not in game.players:
+        sock_map = r.hgetall(f"socket:{request.sid}")
+        alt_id = sock_map.get('player_id') if sock_map else None
+        if alt_id and alt_id in game.players:
+            print(f"handle_bet: client player_id {player_id} not found, falling back to socket-mapped player_id {alt_id}")
+            player_id = alt_id
+
     if player_id in game.players:
         player = game.players[player_id]
-        if player.balance >= bet and game.state == 'betting':
-            player.balance -= bet
-            player.add_hand(bet)
-            
-            # Wenn alle Einsätze platziert sind, starte das Spiel
-            advance_game(game)
+        print(f"handle_bet: found player {player_id} name={player.name} balance={player.balance}")
+        # Delegate to shared place_bet helper which validates state/balance
+        place_bet(game, player, bet)
+    else:
+        print(f"handle_bet: player_id {player_id} not found in game.players; socket mapping: {r.hgetall(f'socket:{request.sid}')}")
 
 @socketio.on('hit')
 def handle_hit(data):

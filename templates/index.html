@@ -9,10 +9,22 @@
     <style>
         .card {
             display: inline-block;
-            font-size: 3rem;
-            margin: 0.25rem;
-            transition: transform 0.2s;
+            font-size: 2rem; /* phone */
+            margin: 0.15rem;
         }
+
+        @media (min-width: 640px) {
+            .card {
+                font-size: 2.5rem;
+            }
+        }
+
+        @media (min-width: 768px) {
+            .card {
+                font-size: 3rem;
+            }
+        }
+
         .card:hover {
             transform: translateY(-5px);
         }
@@ -37,7 +49,7 @@
 </head>
 <body class="bg-gradient-to-br from-green-800 to-green-600 min-h-screen">
     <div class="container mx-auto px-4 py-8">
-        <h1 class="text-5xl font-bold text-center text-white mb-8 drop-shadow-lg">
+        <h1 class="text-3xl sm:text-4xl md:text-5xl font-bold text-center text-white mb-6">
             ♠️ Blackjack - Mehrspieler ♥️
         </h1>
 
@@ -87,6 +99,10 @@
                     <div class="text-white">
                         <span class="text-xl font-bold">👥 Spieler:</span>
                         <span id="player-count" class="text-lg ml-2">0/7</span>
+                    </div>
+                    <div class="text-white">
+                        <span class="text-xl font-bold">🃏 Deck:</span>
+                        <span id="deck-size" class="text-lg ml-2">-</span>
                     </div>
                     <div>
                         <span id="game-status" class="text-xl font-bold text-yellow-400">Warte auf Spieler...</span>
@@ -311,6 +327,11 @@
 
         function updateStatus() {
             document.getElementById('player-count').textContent = `${gameState.player_count}/${gameState.max_players}`;
+            // Update deck size display if provided by server
+            const deckEl = document.getElementById('deck-size');
+            if (deckEl && gameState.deck_size !== undefined) {
+                deckEl.textContent = gameState.deck_size;
+            }
             
             const statusEl = document.getElementById('game-status');
             switch (gameState.state) {

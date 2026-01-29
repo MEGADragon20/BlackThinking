@@ -33,8 +33,8 @@ def play_episode(net, epsilon=0.3):
     deck = DECK.copy()
     random.shuffle(deck)
     # remove something to simulate mid-game or late game even, leave ~ idk 20-30 cards                                                                               
-    #for _ in range(random.randint(0, len(DECK) - 30)):
-    #    draw(deck)
+    for _ in range(random.randint(0, len(DECK) - 30)):
+        draw(deck)
 
     hand = [draw(deck), draw(deck)]
     dealer_hand = [draw(deck)]
@@ -46,9 +46,9 @@ def play_episode(net, epsilon=0.3):
             count(hand),
             value(dealer_hand[0]),
             len(hand),
-            count_highs(deck) - count_lows(deck),
+            (count_highs(deck) - count_lows(deck))/len(deck),
             (len(DECK) - len(deck)) / len(DECK),
-            int('A' in hand)
+            int(sum(1 for card in hand if card == "A"))
         ], dtype=np.float32)
 
         if random.random() < epsilon:
@@ -85,7 +85,7 @@ def play_episode(net, epsilon=0.3):
             count(hand),
             value(dealer_hand[0]),
             len(hand),
-            count_highs(deck) - count_lows(deck),
+            (count_highs(deck) - count_lows(deck))/len(deck),
             (len(DECK) - len(deck)) / len(DECK),
             int(sum(1 for card in hand if card == "A"))
         ], dtype=np.float32)
@@ -111,7 +111,7 @@ def train_q_learning(
     epsilon_decay = (epsilon_start - epsilon_end) / episodes
     epsilon = epsilon_start
 
-    # Initialize target network as a copy of main network
+    # make a copy for the strategy testing
     target_net = Network(n_in=6, n_hidden=16)
     target_net.hidden.W = net.hidden.W.copy()
     target_net.output.W = net.output.W.copy()
@@ -126,7 +126,7 @@ def train_q_learning(
             if done:
                 target[action] = reward
             else:
-                # Use frozen target network for next_state
+                # freeze to test strats
                 next_q = target_net.forward(next_state)
                 target[action] = reward + gamma * np.max(next_q)
 
@@ -134,7 +134,7 @@ def train_q_learning(
             grad = net.output.backward(grad, lr)
             net.hidden.backward(grad, lr)
 
-        # Periodically sync target network to main network
+        # let the main thing know the new strat
         if episode % target_update_freq == 0:
             target_net.hidden.W = net.hidden.W.copy()
             target_net.output.W = net.output.W.copy()
