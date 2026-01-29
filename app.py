@@ -47,6 +47,9 @@ class Card:
     
     def to_dict(self):
         return {'rank': self.rank, 'suit': self.suit}
+    
+    def value(self):
+        return RANK_VALUES[self.rank]
 
 class Deck:
     def __init__(self):
@@ -57,6 +60,9 @@ class Deck:
         if not self.cards:
             self.__init__()
         return self.cards.pop()
+    
+    def cards_list(self) -> list:
+        return [card.value() for card in self.cards]
 
 class Hand:
     def __init__(self):
@@ -69,6 +75,12 @@ class Hand:
     def add_card(self, card):
         self.cards.append(card)
     
+    def get_values(self) -> list:
+        values = []
+        for card in self.cards:
+            values.append(RANK_VALUES[card.rank])
+        return values
+
     def get_value(self):
         value = sum(RANK_VALUES[card.rank] for card in self.cards)
         aces = sum(1 for card in self.cards if card.rank == 'A')
@@ -175,7 +187,7 @@ class Dealer:
         }
 
 class Game:
-    def __init__(self, room_id):
+    def __init__(self, room_id, contains_bot=1):
         self.room_id = room_id
         self.deck = Deck()
         self.dealer = Dealer()
@@ -183,7 +195,10 @@ class Game:
         self.player_order = []
         self.current_player_index = 0
         self.state = 'waiting'  # waiting, betting, playing, dealer_turn, finished
-    
+        if contains_bot > 0:
+            for i in range(contains_bot):
+                self.add_player(f"bot_{i}", f"BlackThinking {i}", is_bot=True)
+
     def to_redis(self):
         return json.dumps({
         'room_id': self.room_id,
@@ -265,6 +280,7 @@ class Game:
     
     def deal_initial_cards(self):
         if self.all_bets_placed():
+            print("dealing intitial cards")
             self.state = 'playing'
             self.current_player_index = 0
             
@@ -275,9 +291,13 @@ class Game:
                     if hand:
                         hand.add_card(self.deck.draw())
                         hand.add_card(self.deck.draw())
-
+                else:
+                    print("Player is not active")
+                    print(player.is_bot)
             self.dealer.hand.add_card(self.deck.draw())
             self.dealer.hand.add_card(self.deck.draw())
+            print("Checkpoint C")
+            self.state = 'playing'
             return True
         return False
     
@@ -381,14 +401,19 @@ def place_bet(game, player, bet):
 
     if game.all_bets_placed():
         game.deal_initial_cards()
+        game.state = 'playing'
+        advance_game(game)
+
 
 def hit(game, player):
+    print("HIT")
     hand = player.get_current_hand()
     hand.add_card(game.deck.draw())
     if hand.is_bust() or hand.get_value() == 21:
         hand.is_finished = True
         if not player.next_hand():
             game.next_player()
+    advance_game(game)
 
 def stand(game, player):
     hand = player.get_current_hand()
@@ -402,17 +427,17 @@ def bot_place_bet(game, player):
 
 def bot_play_turn(game, player):
     hand = player.get_current_hand()
-
     x = [
-        count(hand),
-        game.dealer.hand.cards[0].rank,
+        count(hand.get_values()),
+        int(game.dealer.hand.cards[0].value()),
         len(hand.cards),
-        count_highs(game.deck.cards) - count_lows(game.deck.cards),
-        ((16*52) - len(game.deck.cards)) / (16*52),
+        count_highs(game.deck.cards_list()) - count_lows(game.deck.cards_list()),
+        ((16*52) - len(game.deck.cards_list())) / (16*52),
         int(any(c.rank == 'A' for c in hand.cards))
     ]
-
+    print("NET will start")
     should_hit = NET.predict(x)
+    print("NET prediction:", should_hit)
 
     if should_hit:
         hit(game, player)
@@ -423,6 +448,8 @@ def bot_play_turn(game, player):
 
 
 def maybe_trigger_bots(game):
+    print("triggering triggers")
+    print(game.state)
     if game.state == 'betting':
         for p in game.players.values():
             if p.is_bot and len(p.hands) == 0:
@@ -432,6 +459,13 @@ def maybe_trigger_bots(game):
         current = game.get_current_player()
         if current and current.is_bot:
             bot_play_turn(game, current)
+
+    elif game.state == 'waiting':
+        for p in game.players.values():
+            if p.is_bot:
+                p.is_ready = True
+        if game.all_players_ready():
+            game.start_betting()
 
 def advance_game(game):
     maybe_trigger_bots(game)
@@ -545,9 +579,7 @@ def handle_toggle_ready(data):
         # Wenn alle bereit sind, starte Betting-Phase
         if game.state == 'waiting' and game.all_players_ready():
             game.start_betting()
-
-        save_game(game)
-        emit('game_state', game.to_dict(), room=room_id)
+        advance_game(game)
 
 @socketio.on('place_bet')
 def handle_bet(data):
@@ -567,9 +599,6 @@ def handle_bet(data):
             player.add_hand(bet)
             
             # Wenn alle Einsätze platziert sind, starte das Spiel
-            if game.all_bets_placed():
-                game.deal_initial_cards()
-            
             advance_game(game)
 
 @socketio.on('hit')
