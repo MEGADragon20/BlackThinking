@@ -1,3 +1,1 @@
-2 Player + Bot -> something // may be happening also in solo
-Joining mid-game
 results not displayed

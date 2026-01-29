@@ -34,9 +34,6 @@
         .card-black {
             color: #1f2937;
         }
-        .pulse {
-            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
         @keyframes pulse {
             0%, 100% {
                 opacity: 1;
@@ -91,7 +88,8 @@
             
             <!-- Status Leiste -->
             <div class="bg-white/10 backdrop-blur-sm rounded-xl p-4 mb-6">
-                <div class="flex justify-between items-center">
+                <div class="flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-center">
+
                     <div class="text-white">
                         <span class="text-xl font-bold">🎮 Raum:</span>
                         <span id="room-display" class="text-lg ml-2">-</span>
@@ -262,6 +260,10 @@
         socket.on('error', (data) => {
             alert(data.message);
         });
+        socket.on('redirect', (data) => {
+            const url = data.url || '/';
+            window.location.href = url;
+        });
 
         function joinGame() {
             const name = document.getElementById('player-name-input').value.trim() || 'Spieler';
@@ -324,6 +326,36 @@
             // Update Action Buttons
             updateActionButtons();
         }
+        function unicodeCard(rank, suit) {
+            const suitMap = {
+                '♠': 0x1F0A0,
+                '♥': 0x1F0B0,
+                '♦': 0x1F0C0,
+                '♣': 0x1F0D0
+            };
+
+            const rankMap = {
+                'A': 1,
+                '2': 2,
+                '3': 3,
+                '4': 4,
+                '5': 5, 
+                '6': 6,
+                '7': 7,
+                '8': 8,
+                '9': 9,
+                '10': 10,
+                'J': 11,
+                'Q': 13,
+                'K': 14
+            };  
+            const base = suitMap[suit];
+            const offset = rankMap[rank];
+
+            if (!base || !offset) return '🂠'; // card back fallback
+
+            return String.fromCodePoint(base + offset);
+        }
 
         function updateStatus() {
             document.getElementById('player-count').textContent = `${gameState.player_count}/${gameState.max_players}`;
@@ -365,7 +397,7 @@
             dealerCards.innerHTML = gameState.dealer.cards.map(card => {
                 const isRed = ['♥', '♦'].includes(card.suit);
                 const colorClass = isRed ? 'card-red' : 'card-black';
-                return `<span class="card ${colorClass}">${card.rank}${card.suit}</span>`;
+                return `<span class="card ${colorClass}">${unicodeCard(card.rank, card.suit)}</span>`;
             }).join('');
 
             if (gameState.dealer.value === '?') {
@@ -402,7 +434,7 @@
                         const cardsHTML = hand.cards.map(card => {
                             const isRed = ['♥', '♦'].includes(card.suit);
                             const colorClass = isRed ? 'card-red' : 'card-black';
-                            return `<span class="card ${colorClass}">${card.rank}${card.suit}</span>`;
+                            return `<span class="card ${colorClass}">${unicodeCard(card.rank, card.suit)}</span>`;
                         }).join('');
 
                         let statusText = '';
@@ -553,7 +585,7 @@
         }
 
         function newRound() {
-            socket.emit('new_round', { room_id: gameState.room_id});
+            socket.emit('new_round', { room_id: gameState.room_id, player_id: myPlayerId });
             isReady = false;
         }
 

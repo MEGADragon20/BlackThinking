@@ -1,4 +1,4 @@
-from flask import Flask, json, render_template, request, session
+from flask import Flask, json, render_template, request, redirect
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import random, os, dotenv
 from hit_prod import Network, count, count_highs, count_lows
@@ -199,6 +199,7 @@ class Game:
         self.player_order = []
         self.current_player_index = 0
         self.state = 'waiting'  # waiting, betting, playing, dealer_turn, finished
+        self.is_last_round = False
         if contains_bot > 0:
             for i in range(contains_bot):
                 self.add_player(f"bot_{i}", f"BlackThinking {i}", is_bot=True)
@@ -375,7 +376,6 @@ class Game:
         return results
     
     def reset_round(self):
-        # Keep the existing deck to allow it to deplete over multiple rounds.
         # Do not reinitialize `self.deck` here.
         self.dealer.reset()
         for player in self.players.values():
@@ -501,12 +501,19 @@ def advance_game(game):
     maybe_trigger_bots(game)
     print("Cards:", len(game.deck.cards))
 
+    if len(game.deck.cards) < 21:
+        game.is_last_round = True
+        emit('error', {"message": "Das Kartendeck ist fast leer. Dies ist die letzte Runde!"})
+
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
         save_game(game)
         emit('round_results', {'results': results}, room=game.room_id)
         return
-
+    if game.state == 'betting':
+        for p in game.players.values():
+            if p.balance == 0:
+                game.remove_player(p.id)
     save_game(game)
     emit('game_state', game.to_dict(), room=game.room_id)
 
@@ -543,6 +550,10 @@ def handle_join(data):
         return
 
     game = get_or_create_game(room_id)
+    if game.state != 'waiting':
+        emit('redirect', {'url': '/'})
+        emit('error', {'message': 'Spiel läuft bereits! Versuch eine neue Raum-ID.'})
+        return
 
     # Add or load player
     player = game.add_player(player_id, player_name)
@@ -627,22 +638,23 @@ def handle_bet(data):
     
     if not room_id or not player_id:
         return
-    print(f"handle_bet called: room={room_id} player_id={player_id} bet={bet}")
-    game = get_or_create_game(room_id)
-    print(f"handle_bet: game players={list(game.players.keys())}")
 
-    # If the client sent a player_id that doesn't match, try to recover
+    game = get_or_create_game(room_id)
+    p = game.players.get(player_id)
+
+    
+    # recover in wcs 
     if player_id not in game.players:
         sock_map = r.hgetall(f"socket:{request.sid}")
         alt_id = sock_map.get('player_id') if sock_map else None
         if alt_id and alt_id in game.players:
             print(f"handle_bet: client player_id {player_id} not found, falling back to socket-mapped player_id {alt_id}")
             player_id = alt_id
+    
 
     if player_id in game.players:
         player = game.players[player_id]
         print(f"handle_bet: found player {player_id} name={player.name} balance={player.balance}")
-        # Delegate to shared place_bet helper which validates state/balance
         place_bet(game, player, bet)
     else:
         print(f"handle_bet: player_id {player_id} not found in game.players; socket mapping: {r.hgetall(f'socket:{request.sid}')}")
@@ -824,16 +836,30 @@ def handle_split(data):
 @socketio.on('new_round')
 def handle_new_round(data):
     room_id = data.get('room_id')
-
+    player_id = data.get('player_id')
     if not room_id:
         return
 
     game = get_or_create_game(room_id)
-
+    p = game.players.get(player_id)
+    if p.balance == 0:
+        game.remove_player(p.id)
+        emit('error', {'message': f'Du wurdest entfernt, da kein Guthaben mehr vorhanden ist.'})
+        emit('redirect', {'url': '/'})
+        return
+    
     # Only allow reset after round finished
     if game.state != 'finished':
         return
-
+    if game.is_last_round:
+        with open("highscores.txt", "a") as f:
+            for player in game.players.values():
+                f.write(f"{player.name}: {player.balance}\n") if player.balance > 2000 else None
+            f.write("#############################\n")
+        r.delete(f"game:{room_id}")
+        emit('error', {'message': 'Das Spiel ist vorbei. Falls ihr viel Geld gewonnen habt, wurde euer Highscore gespeichert!'})
+        emit('redirect', {'url': '/'})
+        return
     game.reset_round()
 
     save_game(game)
