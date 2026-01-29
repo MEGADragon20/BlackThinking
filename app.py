@@ -147,46 +147,6 @@ class Player:
             'is_active': self.is_active
         }
 
-    def play_as_bot(self, game):
-        if not self.is_bot:
-            return
-        while not self.is_ready:
-            hand = self.get_current_hand()
-            if hand is None:
-                break
-            x = [
-                count(hand),
-                game.dealer.hand.cards[0].rank,
-                len(hand),
-                count_highs(game.deck.cards) - count_lows(game.deck.cards),
-                ((16*52) - len(game.deck.cards)) / len(DECK),
-                int('A' in hand.cards)
-            ]
-            should_hit = NET.predict(x=x)
-            if should_hit == True:
-                action = 'hit'
-            else:
-                action = 'stand'
-
-            self.perform_action(action, game)
-
-    def perform_action(self, action, game):
-        if not self.is_bot:
-            return
-        hand = self.get_current_hand()
-        if hand is None:
-            return
-
-        # send req to socket
-
-        if action == 'hit':
-            hand.add_card(game.deck.draw())
-        elif action == 'stand':
-            hand.is_finished = True
-            # next player
-            if not self.next_hand():
-                game.next_player()
-        r.set(f"game:{game.room_id}", game.to_redis())
 
 
 
@@ -406,6 +366,85 @@ class Game:
             'max_players': MAX_PLAYERS,
             'all_ready': self.all_players_ready()
         }
+    
+def save_game(game):
+    r.set(f"game:{game.room_id}", game.to_redis())
+
+def place_bet(game, player, bet):
+    if game.state != 'betting':
+        return
+    if player.balance < bet:
+        return
+
+    player.balance -= bet
+    player.add_hand(bet)
+
+    if game.all_bets_placed():
+        game.deal_initial_cards()
+
+def hit(game, player):
+    hand = player.get_current_hand()
+    hand.add_card(game.deck.draw())
+    if hand.is_bust() or hand.get_value() == 21:
+        hand.is_finished = True
+        if not player.next_hand():
+            game.next_player()
+
+def stand(game, player):
+    hand = player.get_current_hand()
+    hand.is_finished = True
+    if not player.next_hand():
+        game.next_player()
+
+def bot_place_bet(game, player):
+    bet = round(player.balance/10)
+    place_bet(game, player, bet)
+
+def bot_play_turn(game, player):
+    hand = player.get_current_hand()
+
+    x = [
+        count(hand),
+        game.dealer.hand.cards[0].rank,
+        len(hand.cards),
+        count_highs(game.deck.cards) - count_lows(game.deck.cards),
+        ((16*52) - len(game.deck.cards)) / (16*52),
+        int(any(c.rank == 'A' for c in hand.cards))
+    ]
+
+    should_hit = NET.predict(x)
+
+    if should_hit:
+        hit(game, player)
+    else:
+        stand(game, player)
+    
+    
+
+
+def maybe_trigger_bots(game):
+    if game.state == 'betting':
+        for p in game.players.values():
+            if p.is_bot and len(p.hands) == 0:
+                bot_place_bet(game, p)
+
+    elif game.state == 'playing':
+        current = game.get_current_player()
+        if current and current.is_bot:
+            bot_play_turn(game, current)
+
+def advance_game(game):
+    maybe_trigger_bots(game)
+
+    if game.state == 'dealer_turn':
+        results = resolve_dealer_and_finish(game)
+        save_game(game)
+        emit('round_results', {'results': results}, room=game.room_id)
+        return
+
+    save_game(game)
+    emit('game_state', game.to_dict(), room=game.room_id)
+
 
 
 def get_or_create_game(room_id):
@@ -449,7 +488,7 @@ def handle_join(data):
         "player_id": player_id
     })
 
-    r.set(f"game:{room_id}", game.to_redis())
+    save_game(game)
 
     emit('game_state', game.to_dict(), room=room_id)
     emit(
@@ -482,7 +521,7 @@ def handle_disconnect():
         if not game.players:
             r.delete(f"game:{room_id}")
         else:
-            r.set(f"game:{room_id}", game.to_redis())
+            save_game(game)
             emit('game_state', game.to_dict(), room=room_id)
             emit('player_left', {'player_name': player_name}, room=room_id)
 
@@ -506,8 +545,8 @@ def handle_toggle_ready(data):
         # Wenn alle bereit sind, starte Betting-Phase
         if game.state == 'waiting' and game.all_players_ready():
             game.start_betting()
-        
-        r.set(f"game:{room_id}", game.to_redis())
+
+        save_game(game)
         emit('game_state', game.to_dict(), room=room_id)
 
 @socketio.on('place_bet')
@@ -531,8 +570,7 @@ def handle_bet(data):
             if game.all_bets_placed():
                 game.deal_initial_cards()
             
-            r.set(f"game:{room_id}", game.to_redis())
-            emit('game_state', game.to_dict(), room=room_id)
+            advance_game(game)
 
 @socketio.on('hit')
 def handle_hit(data):
@@ -567,17 +605,13 @@ def handle_hit(data):
     # Dealer phase
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
-
-        # Persist
-        r.set(f"game:{room_id}", game.to_redis())
-
-        emit('game_state', game.to_dict(), room=room_id)
-        emit('round_results', {'results': results}, room=room_id)
+        
+        advance_game(game)
+        
         return
 
     # Persist normal state
-    r.set(f"game:{room_id}", game.to_redis())
-    emit('game_state', game.to_dict(), room=room_id)
+    advance_game(game)
 
 @socketio.on('stand')
 def handle_stand(data):
@@ -597,13 +631,7 @@ def handle_stand(data):
         return
 
     hand = current_player.get_current_hand()
-    print(hand.cards)
-    print("Is finished", hand.is_finished)
     if not hand or hand.is_finished:
-        print("Invalid hand state")
-        print(hand.is_finished)
-        print("Player's current hand:", current_player.get_current_hand().cards)
-        print("current hand index:", current_player.current_hand_index)
         return
     hand.is_finished = True
 
@@ -614,15 +642,12 @@ def handle_stand(data):
     # Dealer phase
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
-
-        r.set(f"game:{room_id}", game.to_redis())
-        emit('game_state', game.to_dict(), room=room_id)
-        emit('round_results', {'results': results}, room=room_id)
+        
+        advance_game(game)
         return
 
     # Persist normal state
-    r.set(f"game:{room_id}", game.to_redis())
-    emit('game_state', game.to_dict(), room=room_id)
+    advance_game(game)
 
 @socketio.on('double')
 def handle_double(data):
@@ -659,14 +684,11 @@ def handle_double(data):
     if game.state == 'dealer_turn':
         results = resolve_dealer_and_finish(game)
 
-        r.set(f"game:{room_id}", game.to_redis())
-        emit('game_state', game.to_dict(), room=room_id)
-        emit('round_results', {'results': results}, room=room_id)
+        advance_game(game)
         return
 
     # Persist normal state
-    r.set(f"game:{room_id}", game.to_redis())
-    emit('game_state', game.to_dict(), room=room_id)
+    advance_game(game)
 
 @socketio.on('split')
 def handle_split(data):
@@ -722,8 +744,7 @@ def handle_split(data):
     current_player.balance -= hand.bet
 
     # Persist and notify
-    r.set(f"game:{room_id}", game.to_redis())
-    emit('game_state', game.to_dict(), room=room_id)
+    advance_game(game)
 
 @socketio.on('new_round')
 def handle_new_round(data):
@@ -740,7 +761,7 @@ def handle_new_round(data):
 
     game.reset_round()
 
-    r.set(f"game:{room_id}", game.to_redis())
+    save_game(game)
     emit('game_state', game.to_dict(), room=room_id)
 
 
