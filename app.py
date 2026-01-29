@@ -2,8 +2,9 @@ from flask import Flask, json, render_template, request, session
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import random
 import uuid
-import redis, os
-import dotenv
+import redis, os, dotenv
+from hit_prod import Network, count, count_highs, count_lows
+
 
 dotenv.load_dotenv()
 
@@ -13,6 +14,9 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 r = redis.Redis.from_url(os.environ["UPSTASH_REDIS_URL"], decode_responses=True)
 
+with open("hit.json", "r") as f:
+    data = json.load(f)
+    NET = Network.from_dict(data, n_in=6, n_hidden=16)
 
 # Kartenwerte und Symbole
 SUITS = ['♠', '♥', '♦', '♣']
@@ -46,7 +50,7 @@ class Card:
 
 class Deck:
     def __init__(self):
-        self.cards = [Card(rank, suit) for suit in SUITS for rank in RANKS]
+        self.cards = [Card(rank, suit) for suit in SUITS for rank in RANKS]*4
         random.shuffle(self.cards)
     
     def draw(self):
@@ -142,6 +146,49 @@ class Player:
             'is_ready': self.is_ready,
             'is_active': self.is_active
         }
+
+    def play_as_bot(self, game):
+        if not self.is_bot:
+            return
+        while not self.is_ready:
+            hand = self.get_current_hand()
+            if hand is None:
+                break
+            x = [
+                count(hand),
+                game.dealer.hand.cards[0].rank,
+                len(hand),
+                count_highs(game.deck.cards) - count_lows(game.deck.cards),
+                ((16*52) - len(game.deck.cards)) / len(DECK),
+                int('A' in hand.cards)
+            ]
+            should_hit = NET.predict(x=x)
+            if should_hit == True:
+                action = 'hit'
+            else:
+                action = 'stand'
+
+            self.perform_action(action, game)
+
+    def perform_action(self, action, game):
+        if not self.is_bot:
+            return
+        hand = self.get_current_hand()
+        if hand is None:
+            return
+
+        # send req to socket
+
+        if action == 'hit':
+            hand.add_card(game.deck.draw())
+        elif action == 'stand':
+            hand.is_finished = True
+            # next player
+            if not self.next_hand():
+                game.next_player()
+        r.set(f"game:{game.room_id}", game.to_redis())
+
+
 
 class Dealer:
     def __init__(self):
