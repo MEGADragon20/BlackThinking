@@ -1,6 +1,6 @@
 import numpy as np
 import random, json
-from hit_prod import train_q_learning, evaluate, DECK, play_episode
+from hit import train_q_learning, evaluate, DECK, play_episode
 from network import Network, count
 
 net = Network(n_in=6, n_hidden=32)
